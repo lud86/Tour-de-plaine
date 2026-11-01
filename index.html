@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#3f7a2a">
+<meta name="robots" content="noindex">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Tour de Plaine</title>
+<style>
+:root{--bg:#f3f1ea;--surface:#fffdf7;--line:#d9d3c2;--fg:#2b2418;--muted:#6f6552;--leaf:#3f7a2a;--leaf-ink:#fff;--bad:#b3261e}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17140f;--surface:#211d16;--line:#3a3427;--fg:#ece6d6;--muted:#a69c86;--leaf:#7cc35a;--leaf-ink:#14200d;--bad:#ff7b6e;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#17140f;--surface:#211d16;--line:#3a3427;--fg:#ece6d6;--muted:#a69c86;--leaf:#7cc35a;--leaf-ink:#14200d;--bad:#ff7b6e;color-scheme:dark}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+[hidden]{display:none!important}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;max-width:440px;width:100%;display:flex;flex-direction:column;gap:12px;box-sizing:border-box}
+.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
+h1{font-size:30px;line-height:1.05;margin:0}
+p{margin:0}
+label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+input{font:16px ui-monospace,monospace;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:9px 10px;width:100%;box-sizing:border-box}
+button{font:inherit;font-weight:600;font-size:17px;padding:13px;border-radius:8px;border:0;background:var(--leaf);color:var(--leaf-ink);cursor:pointer}
+button:disabled{opacity:.6}
+.msg{font-size:13px;color:var(--muted);min-height:1.2em}
+.msg.err{color:var(--bad)}
+</style>
+</head>
+<body>
+<div class="panel" id="porte" hidden>
+  <div class="eyebrow">Accès réservé</div>
+  <h1>Tour de Plaine</h1>
+  <p>Saisissez la clé GitHub d'accès (le jeton commençant par « github_pat_ »). Elle n'est demandée qu'une fois sur ce téléphone et n'est enregistrée que sur lui.</p>
+  <label for="repo">Dépôt<input id="repo" type="text" autocomplete="off" spellcheck="false"></label>
+  <label for="cle">Clé d'accès<input id="cle" type="password" autocomplete="off" placeholder="github_pat_…"></label>
+  <button id="ok" type="button">Ouvrir</button>
+  <div class="msg" id="msg" role="status"></div>
+</div>
+<p class="msg" id="charge">Chargement…</p>
+<script>
+/* Porte d'entrée : l'application est rangée dans un dépôt privé et n'est téléchargée qu'avec une clé valide.
+   Une copie reste sur le téléphone pour fonctionner sans réseau au champ. */
+(() => {
+  const ls = {
+    get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
+    set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ return false; } },
+    del(k){ try{ localStorage.removeItem(k); }catch(e){} }
+  };
+  const $ = id => document.getElementById(id);
+  const DEPOT = "lud86/Tour-de-plaine-donnee";
+  const avecDelai = (p, ms) => Promise.race([p, new Promise((_, ko) => setTimeout(() => ko(new Error("délai")), ms))]);
+  const versionDe = html => (html.match(/const APP_VERSION = "(\d+)"/) || [])[1] || null;
+
+  async function telecharger(repo, cle){
+    const r = await avecDelai(fetch(`https://api.github.com/repos/${repo}/contents/app/index.html`, { cache:"no-store",
+      headers:{ Authorization:`Bearer ${cle}`, Accept:"application/vnd.github.raw+json", "X-GitHub-Api-Version":"2022-11-28" } }), 15000);
+    if(r.status === 401 || r.status === 403 || r.status === 404) return { refus:true };
+    if(!r.ok) throw new Error("GitHub " + r.status);
+    const html = await r.text();
+    if(!versionDe(html)) throw new Error("fichier inattendu");
+    return { html };
+  }
+  function lancer(html){ document.open(); document.write(html); document.close(); }
+  function garder(html){ if(!ls.set("app_html", html)){ ls.del("app_html"); } }
+  function porte(texte, erreur){
+    $("charge").hidden = true; $("porte").hidden = false;
+    $("repo").value = ls.get("gh_repo", DEPOT);
+    $("msg").textContent = texte || ""; $("msg").classList.toggle("err", !!erreur);
+  }
+  function oublier(){ ls.del("app_html"); ls.del("acces_ok"); }
+
+  async function demarrer(){
+    const repo = ls.get("gh_repo", DEPOT), cle = ls.get("gh_token", ""), copie = ls.get("app_html", null);
+    if(!cle){ oublier(); porte(); return; }
+    if(copie){
+      // une copie est là : on ne retélécharge que si une nouvelle version est publiée
+      let publiee = null;
+      try{ const r = await avecDelai(fetch("version.json?t=" + Date.now(), { cache:"no-store" }), 2500); if(r.ok) publiee = (await r.json()).version; }catch(e){}
+      if(!publiee || publiee === versionDe(copie)){ lancer(copie); return; }
+      try{
+        const t = await telecharger(repo, cle);
+        if(t.refus){ oublier(); porte("Cette clé n'a plus accès : saisissez une nouvelle clé.", true); return; }
+        garder(t.html); lancer(t.html); return;
+      }catch(e){ lancer(copie); return; }        // réseau faible : on garde la version déjà sur le téléphone
+    }
+    try{
+      const t = await telecharger(repo, cle);
+      if(t.refus){ oublier(); porte("Cette clé n'a pas accès : saisissez une nouvelle clé.", true); return; }
+      garder(t.html); lancer(t.html);
+    }catch(e){ porte("Pas de réseau : la première ouverture sur ce téléphone demande une connexion.", true); }
+  }
+
+  $("ok").onclick = async () => {
+    const repo = $("repo").value.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, ""), cle = $("cle").value.trim();
+    if(!repo || !cle){ porte("Saisissez le dépôt et la clé.", true); return; }
+    $("ok").disabled = true; $("msg").classList.remove("err"); $("msg").textContent = "Vérification et téléchargement…";
+    try{
+      const t = await telecharger(repo, cle);
+      if(t.refus){ porte("Clé refusée : elle ne donne pas accès à ce dépôt.", true); return; }
+      ls.set("gh_repo", repo); ls.set("gh_token", cle); ls.set("acces_ok", repo);
+      garder(t.html); lancer(t.html);
+    }catch(e){ porte("Téléchargement impossible : vérifiez la connexion.", true); }
+    finally{ const b = $("ok"); if(b) b.disabled = false; }
+  };
+  $("cle").addEventListener("keydown", e => { if(e.key === "Enter") $("ok").click(); });
+  // la porte reste disponible sans réseau (service worker) : au champ, la copie de l'appli prend le relais
+  try{ navigator.serviceWorker && navigator.serviceWorker.register("sw.js"); }catch(e){}
+  demarrer();
+})();
+</script>
+</body>
+</html>
